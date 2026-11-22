@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stencil Vectorizer (SVG Export)</title>
+  <style>
+    :root {
+      --bg-color: #121212;
+      --card-bg: #1e1e1e;
+      --accent: #4f46e5;
+      --accent-hover: #4338ca;
+      --text: #e0e0e0;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background-color: var(--bg-color);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      max-width: 900px;
+      width: 100%;
+      background: var(--card-bg);
+      padding: 24px;
+      border-radius: 12px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      background: #2a2a2a;
+      padding: 16px;
+      border-radius: 8px;
+    }
+
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    label {
+      font-size: 0.85rem;
+      font-weight: 600;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      height: 8px;
+      cursor: pointer;
+    }
+
+    input[type="file"], input[type="color"], input[type="checkbox"] {
+      cursor: pointer;
+    }
+
+    .btn-group {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    button, .file-label {
+      background: var(--accent);
+      color: white;
+      border: none;
+      padding: 10px 18px;
+      border-radius: 6px;
+      font-weight: 600;
+      cursor: pointer;
+      text-align: center;
+      transition: background 0.2s;
+    }
+
+    button:hover, .file-label:hover { background: var(--accent-hover); }
+    input[type="file"] { display: none; }
+
+    .preview-area {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 350px;
+      background: #181818;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px dashed #444;
+    }
+
+    canvas {
+      max-width: 100%;
+      height: auto;
+      display: block;
+    }
+
+    .status-msg {
+      font-size: 0.85rem;
+      color: #a0a0a0;
+    }
+  </style>
+  <!-- Potrace JS library for vectorizing raster bitmaps into clean SVG -->
+  <script src="https://cdn.jsdelivr.net/npm/potrace@2.1.8/potrace.min.js"></script>
+</head>
+<body>
+
+<div class="container">
+  <h2>Stencil Vectorizer (SVG Export)</h2>
+
+  <div class="controls">
+    <div class="control-group">
+      <label>Select Image</label>
+      <label for="upload" class="file-label">Choose File</label>
+      <input type="file" id="upload" accept="image/*">
+    </div>
+
+    <div class="control-group">
+      <label>Contrast Threshold <span id="val-threshold">128</span></label>
+      <input type="range" id="threshold" min="1" max="254" value="128">
+    </div>
+
+    <div class="control-group">
+      <label>Line Softness / Edge <span id="val-blur">0</span></label>
+      <input type="range" id="blur" min="0" max="10" value="0" step="0.5">
+    </div>
+
+    <div class="control-group">
+      <label>Invert Colors</label>
+      <input type="checkbox" id="invert">
+    </div>
+
+    <div class="control-group">
+      <label>Shadow Color</label>
+      <input type="color" id="fgColor" value="#2a2d32">
+    </div>
+
+    <div class="control-group">
+      <label>Background Color</label>
+      <input type="color" id="bgColor" value="#dcdcdc">
+    </div>
+  </div>
+
+  <div class="btn-group">
+    <button id="downloadSvgBtn">Export Vector SVG</button>
+    <button id="downloadPngBtn" style="background:#4b5563;">Export PNG</button>
+  </div>
+  <div class="status-msg" id="status">Ready</div>
+
+  <div class="preview-area">
+    <canvas id="canvas"></canvas>
+  </div>
+</div>
+
+<script>
+  const upload = document.getElementById('upload');
+  const thresholdInput = document.getElementById('threshold');
+  const blurInput = document.getElementById('blur');
+  const invertInput = document.getElementById('invert');
+  const fgColorInput = document.getElementById('fgColor');
+  const bgColorInput = document.getElementById('bgColor');
+  const downloadSvgBtn = document.getElementById('downloadSvgBtn');
+  const downloadPngBtn = document.getElementById('downloadPngBtn');
+  const statusEl = document.getElementById('status');
+  
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+  const offCanvas = document.createElement('canvas');
+  const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
+
+  let img = new Image();
+  let imgLoaded = false;
+  let renderRequested = false;
+
+  window.addEventListener('load', () => {
+    img.crossOrigin = "anonymous";
+    img.src = 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80';
+    img.onload = () => { setupImage(); };
+  });
+
+  upload.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        img = new Image();
+        img.onload = () => { setupImage(); };
+        img.src = event.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
+  });
+
+  function setupImage() {
+    imgLoaded = true;
+    canvas.width = img.width;
+    canvas.height = img.height;
+
+    const maxDimension = 800;
+    let scale = Math.min(1, maxDimension / Math.max(img.width, img.height));
+    offCanvas.width = Math.round(img.width * scale);
+    offCanvas.height = Math.round(img.height * scale);
+
+    requestProcess();
+  }
+
+  const inputs = [thresholdInput, blurInput, invertInput, fgColorInput, bgColorInput];
+  inputs.forEach(input => {
+    input.addEventListener('input', () => {
+      document.getElementById('val-threshold').textContent = thresholdInput.value;
+      document.getElementById('val-blur').textContent = blurInput.value;
+      requestProcess();
+    });
+  });
+
+  function requestProcess() {
+    if (!imgLoaded) return;
+    if (!renderRequested) {
+      renderRequested = true;
+      requestAnimationFrame(() => {
+        processImage();
+        renderRequested = false;
+      });
+    }
+  }
+
+  function processImage() {
+    const w = offCanvas.width;
+    const h = offCanvas.height;
+
+    const blurVal = parseFloat(blurInput.value);
+    offCtx.filter = blurVal > 0 ? `blur(${blurVal}px)` : 'none';
+    offCtx.drawImage(img, 0, 0, w, h);
+
+    const imgData = offCtx.getImageData(0, 0, w, h);
+    const data = imgData.data;
+
+    const threshold = parseInt(thresholdInput.value);
+    const isInverted = invertInput.checked;
+
+    const fg = hexToRgb(fgColorInput.value);
+    const bg = hexToRgb(bgColorInput.value);
+
+    for (let i = 0; i < data.length; i += 4) {
+      const brightness = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      let isForeground = brightness < threshold;
+      if (isInverted) isForeground = !isForeground;
+
+      const color = isForeground ? fg : bg;
+      data[i]     = color.r;
+      data[i + 1] = color.g;
+      data[i + 2] = color.b;
+    }
+
+    offCtx.filter = 'none';
+    offCtx.putImageData(imgData, 0, 0);
+
+    ctx.drawImage(offCanvas, 0, 0, canvas.width, canvas.height);
+  }
+
+  function hexToRgb(hex) {
+    const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+    return result ? {
+      r: parseInt(result[1], 16),
+      g: parseInt(result[2], 16),
+      b: parseInt(result[3], 16)
+    } : { r: 0, g: 0, b: 0 };
+  }
+
+  // --- SVG Vectorization ---
+  downloadSvgBtn.addEventListener('click', () => {
+    if (!imgLoaded) return;
+    statusEl.textContent = "Tracing vector paths...";
+
+    // Use full-resolution canvas for high-quality SVG curves
+    offCanvas.width = img.width;
+    offCanvas.height = img.height;
+
+    const blurVal = parseFloat(blurInput.value);
+    offCtx.filter = blurVal > 0 ? `blur(${blurVal}px)` : 'none';
+    offCtx.drawImage(img, 0, 0, img.width, img.height);
+
+    const imgData = offCtx.getImageData(0, 0, img.width, img.height);
+    const data = imgData.data;
+    const threshold = parseInt(thresholdInput.value);
+    const isInverted = invertInput.checked;
+
+    for (let i = 0; i < data.length; i += 4) {
+      const brightness = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      let isForeground = brightness < threshold;
+      if (isInverted) isForeground = !isForeground;
+
+      // 0 = black (shapes), 255 = white (background) for Potrace
+      const val = isForeground ? 0 : 255;
+      data[i] = val;
+      data[i + 1] = val;
+      data[i + 2] = val;
+    }
+
+    offCtx.filter = 'none';
+    offCtx.putImageData(imgData, 0, 0);
+
+    // Vectorize using Potrace
+    Potrace.loadImage(offCanvas.toDataURL(), function() {
+      Potrace.setParameter({
+        threshold: 128,
+        turdSize: 2,
+        optCurve: true,
+        alphaMax: 1.0,
+        optTolerance: 0.2
+      });
+
+      Potrace.process(function() {
+        let svgPath = Potrace.getSVG(1);
+        
+        const fgColor = fgColorInput.value;
+        const bgColor = bgColorInput.value;
+        
+        const pathMatch = svgPath.match(/<path d="([^"]+)"/);
+        const pathData = pathMatch ? pathMatch[1] : '';
+
+        // Form clean SVG with vector background rect and shadow paths
+        const fullSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${img.width} ${img.height}" width="${img.width}" height="${img.height}">
+  <rect width="100%" height="100%" fill="${bgColor}" />
+  <path d="${pathData}" fill="${fgColor}" fill-rule="evenodd" />
+</svg>`;
+
+        downloadFile(fullSvg, 'stencil-art.svg', 'image/svg+xml');
+        statusEl.textContent = "SVG Vector downloaded!";
+        setupImage();
+      });
+    });
+  });
+
+  downloadPngBtn.addEventListener('click', () => {
+    offCanvas.width = img.width;
+    offCanvas.height = img.height;
+    processImage();
+
+    const link = document.createElement('a');
+    link.download = 'stencil-art.png';
+    link.href = offCanvas.toDataURL('image/png');
+    link.click();
+
+    setupImage();
+  });
+
+  function downloadFile(content, filename, contentType) {
+    const blob = new Blob([content], { type: contentType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+</script>
+
+</body>
+</html>
